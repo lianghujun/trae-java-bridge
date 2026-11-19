@@ -119,13 +119,14 @@ function normalizeLocations(result) {
   return out;
 }
 
+// vscode.SymbolKind 从 0 开始（File=0），与 LSP 的 1 基编号不同，不要照搬 LSP 枚举
 function symbolKindName(kind) {
   const names = {
-    1: 'File', 2: 'Module', 3: 'Namespace', 4: 'Package', 5: 'Class', 6: 'Method',
-    7: 'Property', 8: 'Field', 9: 'Constructor', 10: 'Enum', 11: 'Interface',
-    12: 'Function', 13: 'Variable', 14: 'Constant', 15: 'String', 16: 'Number',
-    17: 'Boolean', 18: 'Array', 19: 'Object', 20: 'Key', 21: 'Null', 22: 'EnumMember',
-    23: 'Struct', 24: 'Event', 25: 'Operator', 26: 'TypeParameter',
+    0: 'File', 1: 'Module', 2: 'Namespace', 3: 'Package', 4: 'Class', 5: 'Method',
+    6: 'Property', 7: 'Field', 8: 'Constructor', 9: 'Enum', 10: 'Interface',
+    11: 'Function', 12: 'Variable', 13: 'Constant', 14: 'String', 15: 'Number',
+    16: 'Boolean', 17: 'Array', 18: 'Object', 19: 'Key', 20: 'Null', 21: 'EnumMember',
+    22: 'Struct', 23: 'Event', 24: 'Operator', 25: 'TypeParameter',
   };
   return names[kind] || String(kind);
 }
@@ -218,7 +219,11 @@ async function handleApi(reqUrl) {
   if (p === '/references') {
     const result = await execCommand('references', 'vscode.executeReferenceProvider',
       toUri(q.get('file')), toPosition(q.get('line'), q.get('column')));
-    return { count: (result || []).length, items: normalizeLocations(result) };
+    const all = normalizeLocations(result);
+    // limit<=0 表示不截断；大仓库引用可能上千条，调用方可按需收窄
+    const limit = Math.max(0, Number(q.get('limit')) || 0);
+    const items = limit > 0 ? all.slice(0, limit) : all;
+    return { count: all.length, returned: items.length, truncated: items.length < all.length, items };
   }
   if (p === '/documentSymbols') {
     const uri = toUri(q.get('file'));
