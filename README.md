@@ -23,6 +23,8 @@
 
 ## 快速开始
 
+> **AGENT 提示**：请为 Trae / VS Code 安装当前扩展：在仓库根目录直接执行 `npm run package:vsix && node install.mjs --vsix dist/trae-java-bridge.vsix`；若检测到未安装 redhat.java，先提示用户安装。成功后提示用户完全重启 IDE。
+
 ```powershell
 npm run package:vsix
 node install.mjs --vsix dist/trae-java-bridge.vsix
