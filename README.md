@@ -169,3 +169,7 @@ IDE 诊断用于快速定位，不替代编译门禁。JDT LS 的 classpath、�
 [MIT](LICENSE) © 2026 lianghujun
 
 本扩展自有代码以 MIT 发布；redhat.java（EPL-2.0）、Lombok（MIT）等运行时依赖遵循各自协议，不随本仓库分发。
+
+## 声明
+
+本项目是面向 TRAE 开发的第三方开源扩展，TRAE 是其对应权利人的注册商标，本项目与 TRAE 官方不存在任何关联、赞助、认证或合作关系，所有商标权利均归原权利人所有。
