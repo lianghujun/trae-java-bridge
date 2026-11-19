@@ -10,6 +10,10 @@
 </p>
 
 <p align="center">
+  简体中文 | <a href="./README.en.md">English</a>
+</p>
+
+<p align="center">
   <b>把 IDE 的 Java 语言服务安全地暴露给本机 MCP</b><br/>
   符号 · 定义 · 引用 · hover · 实时编译诊断
 </p>
