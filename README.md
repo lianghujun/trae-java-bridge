@@ -1,6 +1,14 @@
 # Trae Java Bridge
 
 <p align="center">
+  <a href="https://github.com/lianghujun/trae-java-bridge/blob/main/package.json"><img src="https://img.shields.io/github/package-json/v/lianghujun/trae-java-bridge?label=version&style=flat-square&color=2F6FEB" alt="version"/></a>
+  <a href="https://github.com/lianghujun/trae-java-bridge"><img src="https://img.shields.io/badge/platform-Trae%20%7C%20VS%20Code-2F6FEB?style=flat-square" alt="platform"/></a>
+  <a href="https://github.com/lianghujun/trae-java-bridge/blob/main/package.json"><img src="https://img.shields.io/badge/dependency-redhat.java-6A5ACD?style=flat-square" alt="dependency"/></a>
+  <a href="https://github.com/lianghujun/trae-java-bridge/commits/main"><img src="https://img.shields.io/github/last-commit/lianghujun/trae-java-bridge?style=flat-square&color=green" alt="last commit"/></a>
+  <a href="https://github.com/lianghujun/trae-java-bridge/stargazers"><img src="https://img.shields.io/github/stars/lianghujun/trae-java-bridge?style=flat-square&color=yellow" alt="stars"/></a>
+</p>
+
+<p align="center">
   <b>把 IDE 的 Java 语言服务安全地暴露给本机 MCP</b><br/>
   符号 · 定义 · 引用 · hover · 实时编译诊断
 </p>
@@ -90,6 +98,12 @@ node install.mjs --vsix dist/trae-java-bridge.vsix
 | 设置中关闭 `enabled` | 信息 | 查看状态 |
 
 单次请求失败不弹窗，只把状态栏切为警告色；恢复正常后自动清除提示状态，可再次触发通知。
+
+状态栏指示示例（正常运行时显示端口）：
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/lianghujun/trae-java-bridge/main/assets/status-bar.png" alt="JDT Bridge 状态栏指示" width="117"/>
+</p>
 
 ## 状态栏
 
