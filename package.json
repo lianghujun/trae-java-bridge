@@ -1,0 +1,67 @@
+{
+  "name": "trae-java-bridge",
+  "displayName": "Trae Java Bridge",
+  "description": "Local HTTP bridge that exposes VS Code Java diagnostics and navigation APIs to the Trae Java Navigator MCP server.",
+  "version": "0.1.10",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "icon": "assets/icon.png",
+  "extensionDependencies": [
+    "redhat.java"
+  ],
+  "keywords": [
+    "java",
+    "jdt",
+    "language-server",
+    "diagnostics",
+    "mcp"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "scripts": {
+    "package:vsix": "npx --yes @vscode/vsce package --allow-missing-repository --no-rewrite-relative-links --out dist/trae-java-bridge.vsix"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "traeJavaBridge.showStatus",
+        "title": "Trae Java Bridge: 查看状态"
+      },
+      {
+        "command": "traeJavaBridge.restart",
+        "title": "Trae Java Bridge: 重启桥接"
+      }
+    ],
+    "configuration": {
+      "title": "Trae Java Bridge",
+      "properties": {
+        "traeJavaBridge.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "启用本机桥接服务。关闭后不监听端口、不写桥接文件，MCP 会自动回退到独立 JDT LS。"
+        },
+        "traeJavaBridge.port": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "监听端口。0 表示随机端口（推荐）；固定端口会失去多窗口自动隔离。"
+        },
+        "traeJavaBridge.commandTimeout": {
+          "type": "number",
+          "default": 15000,
+          "minimum": 1000,
+          "description": "单个 IDE 语言服务命令的超时（毫秒）。索引初始化阶段超时会让 MCP 回退到独立 JDT LS。"
+        }
+      }
+    }
+  }
+}
