@@ -6,6 +6,7 @@
   <a href="https://github.com/lianghujun/trae-java-bridge/blob/main/package.json"><img src="https://img.shields.io/badge/dependency-redhat.java-6A5ACD?style=flat-square" alt="dependency"/></a>
   <a href="https://github.com/lianghujun/trae-java-bridge/commits/main"><img src="https://img.shields.io/github/last-commit/lianghujun/trae-java-bridge?style=flat-square&color=green" alt="last commit"/></a>
   <a href="https://github.com/lianghujun/trae-java-bridge/stargazers"><img src="https://img.shields.io/github/stars/lianghujun/trae-java-bridge?style=flat-square&color=yellow" alt="stars"/></a>
+  <a href="https://github.com/lianghujun/trae-java-bridge/blob/main/LICENSE"><img src="https://img.shields.io/github/license/lianghujun/trae-java-bridge?style=flat-square&color=green" alt="license"/></a>
 </p>
 
 <p align="center">
@@ -162,3 +163,9 @@ IDE 诊断用于快速定位，不替代编译门禁。JDT LS 的 classpath、�
 只有用“目录复制”方式做本地开发调试时，才需要在扩展源码目录执行 `node uninstall.mjs`。
 
 卸载会删除扩展目录、清理 `extensions.json` 登记项与本项目写出的桥接文件。
+
+## 许可证
+
+[MIT](LICENSE) © 2026 lianghujun
+
+本扩展自有代码以 MIT 发布；redhat.java（EPL-2.0）、Lombok（MIT）等运行时依赖遵循各自协议，不随本仓库分发。
