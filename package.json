@@ -2,7 +2,7 @@
   "name": "trae-java-bridge",
   "displayName": "Trae Java Bridge",
   "description": "Local HTTP bridge that exposes VS Code Java diagnostics and navigation APIs to the Trae Java Navigator MCP server.",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "publisher": "local",
   "license": "MIT",
   "engines": {
