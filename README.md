@@ -51,6 +51,7 @@ node install.mjs --vsix dist/trae-java-bridge.vsix
 - 符号搜索：类 / 方法 / 字段位置（1-based 行列）
 - 定义跳转、引用查找、hover、文件结构
 - 实时编译错误/警告：与 Problems 面板一致
+- 诊断一致性兜底：脚本 / AI / git 直接写盘后自动重读磁盘，避免 JDT 返回旧错误
 - 仅监听 `127.0.0.1`，随机端口 + Bearer token，不对外暴露
 
 ## 依赖
@@ -79,7 +80,11 @@ node install.mjs --vsix dist/trae-java-bridge.vsix
 
 文件包含端口、token、窗口标识、工作区列表、redhat.java 与 Lombok 探测结果。MCP 侧按工作区匹配并校验进程存活，多个窗口互不覆盖；窗口关闭时文件自动删除，异常退出留下的文件会被 MCP 清理。
 
-提供接口：`/health`、`/diagnostics`、`/symbols`、`/definition`、`/references`、`/documentSymbols`（支持 `name`/`kind`/`limit` 过滤）、`/hover`。
+提供接口：`/health`、`/diagnostics`、`/refresh`、`/symbols`、`/definition`、`/references`、`/documentSymbols`（支持 `name`/`kind`/`limit` 过滤）、`/hover`。
+
+`/diagnostics` 在返回前会做一次一致性检查：编辑器内容落后于磁盘时，先重读磁盘（只读重载，不写盘）、等待 JDT 刷新，再返回诊断，并附带 `consistency`（`state` / `stale` / `dirty` / `reloaded` / `reason`）；工作区模式附带 `needsRefresh` / `changedFiles`。文件监听对已打开的 `.java` 变化调用同一套逻辑，构建产物目录默认排除。
+
+批量写入时监听路径只做重读、不逐个等待诊断；外部变更停止 2 秒后自动执行一次增量构建（`java.workspace.compile`，单飞、两次构建最小间隔 5 秒），刷新未打开文件与项目级诊断。变更文件数达到 50 时自动升级为 `java.projectConfiguration.update` 完整重载，修复批量移动/重命名后的项目模型错位；也可通过 `/refresh?mode=auto|build|config` 显式触发（`config` 等价于官方“Reload Project”，不需要修改 `pom.xml` 时间戳）。
 
 ## 安装细节
 
@@ -106,7 +111,7 @@ node install.mjs --vsix dist/trae-java-bridge.vsix
 
 单次请求失败不弹窗，只把状态栏切为警告色；恢复正常后自动清除提示状态，可再次触发通知。
 
-状态栏指示示例（正常运行时显示端口）：
+状态栏指示示例（旧版显示端口；当前版本显示实时状态，端口移到悬浮提示）：
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/lianghujun/trae-java-bridge/main/assets/status-bar.png" alt="JDT Bridge 状态栏指示" width="117"/>
@@ -114,27 +119,62 @@ node install.mjs --vsix dist/trae-java-bridge.vsix
 
 ## 状态栏
 
-窗口右下角状态栏：
+窗口右下角状态栏显示“当前在做什么”，随同步/构建/重载实时变化：
 
 | 状态 | 图标与文字 |
 |---|---|
-| 正常 | `$(radio-tower) JDT Bridge:<port>` |
-| 最近请求失败 | `$(warning) JDT Bridge:<port>`（警告底色） |
+| 正常 | `$(radio-tower) JDT Bridge:正常` |
+| 正在重读打开的文件 | `$(sync~spin) JDT Bridge:同步中` |
+| 正在增量编译 | `$(sync~spin) JDT Bridge:构建中` |
+| 正在完整重载项目 | `$(sync~spin) JDT Bridge:重载中` |
+| 有外部变更待刷新 | `$(warning) JDT Bridge:待刷新(N)`（警告底色） |
+| 最近请求失败 | `$(warning) JDT Bridge:异常`（警告底色） |
 | 桥接未运行/扩展异常 | `$(debug-disconnect) JDT Bridge:离线`（警告底色） |
 | 设置中关闭 `enabled` | 隐藏 |
 
-- 悬停可看工作区、redhat.java 激活状态、Lombok、请求数与最近错误
+- 端口、同步活动、工作区、redhat.java 激活状态、Lombok、请求数、项目模型状态（已同步/待刷新、最近刷新方式与时间）与最近错误都在悬浮提示里
 - 点击后打开状态面板；命令面板还提供 `Trae Java Bridge: 重启桥接`
 
 ## 配置
 
-扩展设置（设置 → 扩展 → Trae Java Bridge）：
+扩展设置（设置 → 扩展 → Trae Java Bridge），在设置面板中分为三组：
+
+### 基础
 
 | 设置 | 默认 | 说明 |
 |---|---|---|
 | `traeJavaBridge.enabled` | `true` | 启用/停用桥接服务；关闭后不监听端口、不写桥接文件 |
 | `traeJavaBridge.port` | `0` | `0` 为随机端口；固定端口便于防火墙/端口转发，但会失去多窗口自动隔离 |
 | `traeJavaBridge.commandTimeout` | `15000` | 单个 IDE 命令超时（ms），超时由 MCP 回退兜底 JDT LS |
+| `traeJavaBridge.notifyAfterErrors` | `3` | 连续请求失败多少次后弹出通知 |
+
+### 诊断同步
+
+| 设置 | 默认 | 说明 |
+|---|---|---|
+| `traeJavaBridge.sync.enabled` | `true` | 诊断查询与文件监听时检查编辑器内容是否落后于磁盘；关闭后行为与旧版本一致 |
+| `traeJavaBridge.sync.debounceMs` | `300` | 文件监听去抖窗口（ms），连续保存合并为一次同步 |
+| `traeJavaBridge.sync.cooldownMs` | `800` | 同步失败后的冷却时间（ms），冷却期内不重复尝试 |
+| `traeJavaBridge.sync.maxPer10s` | `3` | 同一文件 10 秒内最大同步次数，超过后熔断 |
+| `traeJavaBridge.sync.timeoutMs` | `2000` | 重读后等待 JDT 刷新诊断的上限（ms），超时返回 `stale` |
+| `traeJavaBridge.sync.maxFileSizeKb` | `2048` | 超过该大小的文件跳过一致性比较（KB） |
+| `traeJavaBridge.sync.revertTimeoutMs` | `5000` | `workbench.action.files.revert` 的超时（ms） |
+| `traeJavaBridge.sync.selfWriteGraceMs` | `1500` | 兜底写盘后忽略自身监听事件的时长（ms） |
+| `traeJavaBridge.watch.exclude` | `target/build/out/node_modules/.git` | 文件监听排除的目录名，用 `/` 或逗号分隔 |
+
+### 项目刷新
+
+| 设置 | 默认 | 说明 |
+|---|---|---|
+| `traeJavaBridge.project.autoBuild` | `true` | 外部变更后是否自动刷新项目模型（单飞） |
+| `traeJavaBridge.project.autoBuildIdleMs` | `2000` | 变更停止多久后触发自动刷新（ms） |
+| `traeJavaBridge.project.autoBuildMinGapMs` | `5000` | 两次自动刷新的最小间隔（ms） |
+| `traeJavaBridge.project.autoConfigMinFiles` | `50` | 批量变更达到该文件数时升级为完整重载 |
+| `traeJavaBridge.project.buildTimeoutMs` | `120000` | `java.workspace.compile` 超时（ms） |
+| `traeJavaBridge.project.reloadTimeoutMs` | `15000` | 完整重载等待诊断静默的上限（ms） |
+| `traeJavaBridge.project.reloadQuietMs` | `800` | 诊断静默多久视为重载完成（ms） |
+| `traeJavaBridge.project.changedFilesLimit` | `20` | `needsRefresh.changedFiles` 最多返回多少个文件 |
+| `traeJavaBridge.project.dirtyMaxFiles` | `2000` | `projectDirty` 最多跟踪多少个文件 |
 
 环境变量（高级）：
 
@@ -158,6 +198,9 @@ IDE 诊断用于快速定位，不替代编译门禁。JDT LS 的 classpath、�
 | 状态栏为警告色 | 最近一次请求失败；悬停查看错误，确认 redhat.java 已激活 |
 | 提示端口被占用 | 把 `traeJavaBridge.port` 改回 `0`（随机端口） |
 | MCP 显示 `standalone-jdtls` | 扩展未激活或桥接目录不一致；确认两侧 `TRAE_JAVA_BRIDGE_DIR` 相同 |
+| 诊断 `consistency.state=dirty` | 文件有未保存修改，扩展不会覆盖；保存或放弃修改后重查 |
+| 诊断 `consistency.state=unknown` | 查看 `reason`：非 UTF-8、文件过大、同步熔断或等待刷新超时会返回该状态 |
+| 批量改文件后 Problems 仍显示旧错误 | 等待约 2 秒让自动刷新完成；变更 ≥50 文件会自动完整重载；仍异常时用 MCP `refresh:"config"` 或命令面板执行 redhat.java 的 Reload Project |
 | 查不到符号 | 确认已打开 Java 工程，并等待 redhat.java 完成索引 |
 
 ## 卸载
