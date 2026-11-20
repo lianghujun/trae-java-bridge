@@ -111,10 +111,10 @@ Failures are reported through the IDE notification panel (bottom-right notificat
 
 Single request failures do not pop up a notification; the status bar turns to a warning color instead, and the state resets automatically after recovery so notifications can fire again.
 
-Status bar example (older build shows the port; the current build shows a live status and moves the port into the hover):
+Status bar example: `JDT Bridge:正常` is the live status; the port, sync activity and project model details are in the hover.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/lianghujun/trae-java-bridge/main/assets/status-bar.png" alt="JDT Bridge status bar indicator" width="117"/>
+  <img src="https://raw.githubusercontent.com/lianghujun/trae-java-bridge/main/assets/status-bar.png?v=0.1.25" alt="JDT Bridge status bar indicator" width="150"/>
 </p>
 
 ## Status Bar

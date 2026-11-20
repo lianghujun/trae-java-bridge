@@ -111,10 +111,10 @@ node install.mjs --vsix dist/trae-java-bridge.vsix
 
 单次请求失败不弹窗，只把状态栏切为警告色；恢复正常后自动清除提示状态，可再次触发通知。
 
-状态栏指示示例（旧版显示端口；当前版本显示实时状态，端口移到悬浮提示）：
+状态栏示例：`JDT Bridge:正常` 为实时状态，端口、同步活动与项目模型信息在悬浮提示中。
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/lianghujun/trae-java-bridge/main/assets/status-bar.png" alt="JDT Bridge 状态栏指示" width="117"/>
+  <img src="https://raw.githubusercontent.com/lianghujun/trae-java-bridge/main/assets/status-bar.png?v=0.1.25" alt="JDT Bridge 状态栏指示" width="150"/>
 </p>
 
 ## 状态栏
