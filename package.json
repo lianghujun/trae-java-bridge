@@ -2,7 +2,7 @@
   "name": "trae-java-bridge",
   "displayName": "Trae Java Bridge",
   "description": "Local HTTP bridge that exposes VS Code Java diagnostics and navigation APIs to the Trae Java Navigator MCP server.",
-  "version": "0.1.17",
+  "version": "0.1.25",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -40,28 +40,151 @@
         "title": "Trae Java Bridge: 重启桥接"
       }
     ],
-    "configuration": {
-      "title": "Trae Java Bridge",
-      "properties": {
-        "traeJavaBridge.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "启用本机桥接服务。关闭后不监听端口、不写桥接文件，MCP 会自动回退到独立 JDT LS。"
-        },
-        "traeJavaBridge.port": {
-          "type": "number",
-          "default": 0,
-          "minimum": 0,
-          "maximum": 65535,
-          "description": "监听端口。0 表示随机端口（推荐）；固定端口会失去多窗口自动隔离。"
-        },
-        "traeJavaBridge.commandTimeout": {
-          "type": "number",
-          "default": 15000,
-          "minimum": 1000,
-          "description": "单个 IDE 语言服务命令的超时（毫秒）。索引初始化阶段超时会让 MCP 回退到独立 JDT LS。"
+    "configuration": [
+      {
+        "title": "基础",
+        "properties": {
+          "traeJavaBridge.enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "启用本机桥接服务。关闭后不监听端口、不写桥接文件，MCP 会自动回退到独立 JDT LS。"
+          },
+          "traeJavaBridge.port": {
+            "type": "number",
+            "default": 0,
+            "minimum": 0,
+            "maximum": 65535,
+            "description": "监听端口。0 表示随机端口（推荐）；固定端口会失去多窗口自动隔离。"
+          },
+          "traeJavaBridge.commandTimeout": {
+            "type": "number",
+            "default": 15000,
+            "minimum": 1000,
+            "description": "单个 IDE 语言服务命令的超时（毫秒）。索引初始化阶段超时会让 MCP 回退到独立 JDT LS。"
+          },
+          "traeJavaBridge.notifyAfterErrors": {
+            "type": "number",
+            "default": 3,
+            "minimum": 1,
+            "description": "连续请求失败多少次后弹出 IDE 通知（同一问题每个窗口只提示一次）。"
+          }
+        }
+      },
+      {
+        "title": "诊断同步",
+        "properties": {
+          "traeJavaBridge.sync.enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "诊断查询与文件监听时检查编辑器内容是否落后于磁盘；落后则重读磁盘并刷新 JDT 工作副本。关闭后行为与旧版本一致。"
+          },
+          "traeJavaBridge.sync.debounceMs": {
+            "type": "number",
+            "default": 300,
+            "minimum": 50,
+            "description": "文件监听去抖窗口（毫秒）；连续保存会合并为一次同步。"
+          },
+          "traeJavaBridge.sync.cooldownMs": {
+            "type": "number",
+            "default": 800,
+            "minimum": 0,
+            "description": "同一文件同步失败后的冷却时间（毫秒），冷却期内不重复尝试。"
+          },
+          "traeJavaBridge.sync.maxPer10s": {
+            "type": "number",
+            "default": 3,
+            "minimum": 1,
+            "description": "同一文件 10 秒内最大同步次数，超过后暂停该文件的自动同步（熔断）。"
+          },
+          "traeJavaBridge.sync.timeoutMs": {
+            "type": "number",
+            "default": 2000,
+            "minimum": 200,
+            "description": "重读磁盘后等待 JDT 刷新诊断的上限（毫秒），超时返回 stale。"
+          },
+          "traeJavaBridge.sync.maxFileSizeKb": {
+            "type": "number",
+            "default": 2048,
+            "minimum": 16,
+            "description": "超过该大小的 Java 文件跳过一次一致性比较，返回 unknown，避免阻塞（单位 KB）。"
+          },
+          "traeJavaBridge.sync.revertTimeoutMs": {
+            "type": "number",
+            "default": 5000,
+            "minimum": 500,
+            "description": "执行 workbench.action.files.revert 的超时（毫秒）；超时后尝试整篇替换兜底。"
+          },
+          "traeJavaBridge.sync.selfWriteGraceMs": {
+            "type": "number",
+            "default": 1500,
+            "minimum": 100,
+            "description": "兜底路径自己写盘后，忽略自身文件监听事件的时长（毫秒）。"
+          },
+          "traeJavaBridge.watch.exclude": {
+            "type": "string",
+            "default": "target/build/out/node_modules/.git",
+            "description": "文件监听排除的目录名，用 / 或逗号分隔；构建产物变化不会触发同步。"
+          }
+        }
+      },
+      {
+        "title": "项目刷新",
+        "properties": {
+          "traeJavaBridge.project.autoBuild": {
+            "type": "boolean",
+            "default": true,
+            "description": "外部变更后是否自动刷新项目模型（增量编译或完整重载）；单飞执行。"
+          },
+          "traeJavaBridge.project.autoBuildIdleMs": {
+            "type": "number",
+            "default": 2000,
+            "minimum": 200,
+            "description": "外部变更停止多久后触发自动刷新（毫秒），用于合并连续写入。"
+          },
+          "traeJavaBridge.project.autoBuildMinGapMs": {
+            "type": "number",
+            "default": 5000,
+            "minimum": 0,
+            "description": "两次自动刷新的最小间隔（毫秒），避免构建风暴。"
+          },
+          "traeJavaBridge.project.autoConfigMinFiles": {
+            "type": "number",
+            "default": 50,
+            "minimum": 1,
+            "description": "一次批量变更达到该文件数时，自动刷新升级为 java.projectConfiguration.update 完整重载。"
+          },
+          "traeJavaBridge.project.buildTimeoutMs": {
+            "type": "number",
+            "default": 120000,
+            "minimum": 5000,
+            "description": "java.workspace.compile 增量编译的超时（毫秒）。"
+          },
+          "traeJavaBridge.project.reloadTimeoutMs": {
+            "type": "number",
+            "default": 15000,
+            "minimum": 1000,
+            "description": "完整重载后等待诊断静默的上限（毫秒）；超时返回 completed=false，重载仍在后台继续。"
+          },
+          "traeJavaBridge.project.reloadQuietMs": {
+            "type": "number",
+            "default": 800,
+            "minimum": 100,
+            "description": "完整重载时，诊断最后一次变化后静默多久视为完成（毫秒）。"
+          },
+          "traeJavaBridge.project.changedFilesLimit": {
+            "type": "number",
+            "default": 20,
+            "minimum": 1,
+            "description": "工作区 needsRefresh 中最多返回的变化文件数。"
+          },
+          "traeJavaBridge.project.dirtyMaxFiles": {
+            "type": "number",
+            "default": 2000,
+            "minimum": 100,
+            "description": "projectDirty 集合最多跟踪的文件数，避免超大变更撑爆内存。"
+          }
         }
       }
-    }
+    ]
   }
 }

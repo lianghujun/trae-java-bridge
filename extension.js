@@ -8,6 +8,8 @@ const os = require('os');
 const path = require('path');
 const { pathToFileURL, fileURLToPath } = require('url');
 
+const { createSyncEngine } = require('./sync');
+
 let server = null;
 let bridgeFile = null;
 let token = null;
@@ -178,6 +180,7 @@ async function handleApi(reqUrl) {
       redhatJavaActive: !!(rh && rh.isActive),
       lombok: lombokInfo(),
       bridgeFile,
+      sync: syncEngine.describe(),
     };
   }
   if (p === '/diagnostics') {
@@ -185,8 +188,16 @@ async function handleApi(reqUrl) {
     const file = q.get('file');
     if (file) {
       const uri = toUri(file);
+      // 查询路径也做一致性检查：外部写入后先重读磁盘，再返回新鲜诊断
+      const consistency = await syncEngine.syncIfNeeded(uri.fsPath);
       const items = diagnosticsToJson(uri, vscode.languages.getDiagnostics(uri));
-      return { file: uriToFile(uri), total: items.length, items: filterBySeverity(items, severity) };
+      return {
+        scope: 'file',
+        file: uriToFile(uri),
+        total: items.length,
+        items: filterBySeverity(items, severity),
+        consistency,
+      };
     }
     const items = [];
     for (const [uri, list] of vscode.languages.getDiagnostics()) {
@@ -194,7 +205,18 @@ async function handleApi(reqUrl) {
     }
     items.sort((a, b) => String(a.file).localeCompare(String(b.file)) || (a.line || 0) - (b.line || 0));
     const filtered = filterBySeverity(items, severity);
-    return { total: filtered.length, items: filtered };
+    return {
+      scope: 'project',
+      total: filtered.length,
+      items: filtered,
+      consistency: syncEngine.projectState(),
+    };
+  }
+  if (p === '/refresh') {
+    // 显式刷新项目模型：build=增量编译，config=完整重载（projectConfiguration.update），auto=按变更规模选择
+    const mode = q.get('mode') || 'auto';
+    const timeout = Number(q.get('timeout')) || undefined;
+    return await syncEngine.refreshProject(mode, timeout);
   }
   if (p === '/symbols') {
     const query = q.get('query') || '';
@@ -277,6 +299,41 @@ function isEnabled() {
   return config().get('enabled', true) !== false;
 }
 
+function numberSetting(key, fallback, min) {
+  const n = Number(config().get(key));
+  return Number.isFinite(n) && n >= min ? n : fallback;
+}
+
+function syncConfig() {
+  return {
+    enabled: config().get('sync.enabled', true) !== false,
+    debounceMs: numberSetting('sync.debounceMs', 300, 50),
+    cooldownMs: numberSetting('sync.cooldownMs', 800, 0),
+    maxPer10s: numberSetting('sync.maxPer10s', 3, 1),
+    timeoutMs: numberSetting('sync.timeoutMs', 2000, 200),
+    maxFileSizeKb: numberSetting('sync.maxFileSizeKb', 2048, 16),
+    revertTimeoutMs: numberSetting('sync.revertTimeoutMs', 5000, 500),
+    selfWriteGraceMs: numberSetting('sync.selfWriteGraceMs', 1500, 100),
+    exclude: String(config().get('watch.exclude') || 'target/build/out/node_modules/.git'),
+    autoBuild: config().get('project.autoBuild', true) !== false,
+    autoBuildIdleMs: numberSetting('project.autoBuildIdleMs', 2000, 200),
+    autoBuildMinGapMs: numberSetting('project.autoBuildMinGapMs', 5000, 0),
+    autoConfigMinFiles: numberSetting('project.autoConfigMinFiles', 50, 1),
+    buildTimeoutMs: numberSetting('project.buildTimeoutMs', 120000, 5000),
+    reloadTimeoutMs: numberSetting('project.reloadTimeoutMs', 15000, 1000),
+    reloadQuietMs: numberSetting('project.reloadQuietMs', 800, 100),
+    changedFilesLimit: numberSetting('project.changedFilesLimit', 20, 1),
+    dirtyMaxFiles: numberSetting('project.dirtyMaxFiles', 2000, 100),
+  };
+}
+
+const syncEngine = createSyncEngine({
+  getRoots: workspaceRoots,
+  getConfig: syncConfig,
+  log: (msg) => console.log('[trae-java-bridge] ' + msg),
+  onStatsChanged: () => updateStatusBar(),
+});
+
 function commandTimeout() {
   const fromConfig = Number(config().get('commandTimeout'));
   if (Number.isFinite(fromConfig) && fromConfig >= 1000) return fromConfig;
@@ -337,6 +394,63 @@ function refreshBridgeFile() {
   }
 }
 
+function activityName(activity) {
+  return {
+    idle: '空闲',
+    syncing: '同步中',
+    building: '增量构建',
+    reloading: '项目重载',
+  }[activity] || String(activity || '空闲');
+}
+
+function syncStatusLine() {
+  const cfg = syncConfig();
+  if (!cfg.enabled) return '同步：已关闭（traeJavaBridge.sync.enabled=false）';
+  const s = syncEngine.describe();
+  const parts = [
+    '已重读 ' + s.reloadedCount + ' 次',
+    '脏冲突 ' + s.dirtyConflicts,
+    '无需动作 ' + s.noopChecks,
+  ];
+  if (s.circuitBroken) parts.push('熔断 ' + s.circuitBroken);
+  const last = s.lastSyncAt ? '；最近 ' + new Date(s.lastSyncAt).toLocaleTimeString() : '';
+  return '同步：' + parts.join('，') + last;
+}
+
+function modelStatusLine() {
+  const cfg = syncConfig();
+  if (!cfg.enabled) return '项目模型：自动刷新已关闭';
+  const s = syncEngine.describe();
+  const dirty = s.projectDirty && s.projectDirty.needsRefresh
+    ? '待刷新（' + (s.projectDirty.changedCount || 0) + ' 个文件）'
+    : '已同步';
+  const mode = s.lastBuildMode ? '，最近方式 ' + s.lastBuildMode : '';
+  const when = s.lastModelRefreshAt ? '，最近刷新 ' + new Date(s.lastModelRefreshAt).toLocaleTimeString() : '';
+  return '项目模型：' + dirty + mode + when;
+}
+
+// 状态栏文字展示“当前在做什么”，端口只放在悬浮提示里
+function bridgeStatus() {
+  if (!server || !server.listening) {
+    return { key: 'offline', icon: 'debug-disconnect', label: '离线', warn: true, activity: null };
+  }
+  if (lastRequestError) {
+    return { key: 'error', icon: 'warning', label: '异常', warn: true, activity: null };
+  }
+  if (!syncConfig().enabled) {
+    return { key: 'ok', icon: 'radio-tower', label: '正常（同步关闭）', warn: false, activity: null };
+  }
+  const s = syncEngine.describe();
+  if (s.activity === 'reloading') return { key: 'reloading', icon: 'sync~spin', label: '重载中', warn: false, activity: s.activity };
+  if (s.activity === 'building') return { key: 'building', icon: 'sync~spin', label: '构建中', warn: false, activity: s.activity };
+  if (s.activity === 'syncing') return { key: 'syncing', icon: 'sync~spin', label: '同步中', warn: false, activity: s.activity };
+  if (s.projectDirty && s.projectDirty.needsRefresh) {
+    const n = s.projectDirty.changedCount || 0;
+    return { key: 'stale', icon: 'warning', label: '待刷新' + (n ? '(' + n + ')' : ''), warn: true, activity: 'idle' };
+  }
+  return { key: 'ok', icon: 'radio-tower', label: '正常', warn: false, activity: 'idle' };
+}
+
 function updateStatusBar() {
   if (!statusBar) return;
   if (!isEnabled()) {
@@ -347,42 +461,33 @@ function updateStatusBar() {
   const roots = workspaceRoots();
   const rh = vscode.extensions.getExtension('redhat.java');
   const lombok = lombokInfo();
+  const status = bridgeStatus();
+  const running = !!(server && server.listening);
 
-  if (!server || !server.listening) {
-    statusBar.text = '$(debug-disconnect) JDT Bridge:离线';
-    statusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-    statusBar.tooltip = [
-      '**Trae Java Bridge**',
-      '',
-      '状态：未运行（离线）',
-      '工作区：' + (roots.length ? roots.join(', ') : '（未打开文件夹）'),
-      'redhat.java：' + (rh ? (rh.isActive ? '已激活' : '已安装未激活') : '未安装'),
-      '最近错误：' + (lastRequestError || '无'),
-      '',
-      '点击查看详情；命令面板可执行“重启桥接”',
-    ].join('\n');
-    return;
-  }
-
-  const port = server.address().port;
-  const failed = !!lastRequestError;
-  statusBar.text = (failed ? '$(warning) ' : '$(radio-tower) ') + 'JDT Bridge:' + port;
-  statusBar.backgroundColor = failed
+  statusBar.text = '$(' + status.icon + ') JDT Bridge:' + status.label;
+  statusBar.backgroundColor = status.warn
     ? new vscode.ThemeColor('statusBarItem.warningBackground')
     : undefined;
-  statusBar.tooltip = [
-    '**Trae Java Bridge**',
-    '',
-    '状态：' + (failed ? '运行中（最近请求失败）' : '运行中（正常）'),
-    '端口：' + port,
+
+  const lines = ['状态：' + status.label];
+  if (running) lines.push('端口：' + server.address().port);
+  lines.push(
+    '同步活动：' + (status.activity ? activityName(status.activity) : '—'),
     '工作区：' + (roots.length ? roots.join(', ') : '（未打开文件夹）'),
     'redhat.java：' + (rh ? (rh.isActive ? '已激活' : '已安装未激活') : '未安装'),
-    'Lombok：' + (lombok.agentJar ? '已启用' : '未探测到'),
-    '请求数：' + requestCount + (lastRequestAt ? '（最近 ' + lastRequestAt.toLocaleTimeString() + '）' : ''),
-    '最近错误：' + (lastRequestError || '无'),
-    '',
-    '点击查看详情；命令面板可执行“重启桥接”',
-  ].join('\n');
+  );
+  if (running) {
+    lines.push(
+      'Lombok：' + (lombok.agentJar ? '已启用' : '未探测到'),
+      '请求数：' + requestCount + (lastRequestAt ? '（最近 ' + lastRequestAt.toLocaleTimeString() + '）' : ''),
+      '最近错误：' + (lastRequestError || '无'),
+      syncStatusLine(),
+      modelStatusLine(),
+    );
+  } else {
+    lines.push('最近错误：' + (lastRequestError || '无'), syncStatusLine());
+  }
+  statusBar.tooltip = lines.join('\n');
 }
 
 async function showStatus() {
@@ -390,16 +495,18 @@ async function showStatus() {
   const rh = vscode.extensions.getExtension('redhat.java');
   const lombok = lombokInfo();
   const running = !!(server && server.listening);
+  const status = bridgeStatus();
   const items = [
-    '状态：' + (running
-      ? (lastRequestError ? '运行中（最近请求失败）' : '运行中（正常）')
-      : '未运行（离线）'),
+    '状态：' + status.label,
+    '同步活动：' + (status.activity ? activityName(status.activity) : '—'),
     '端口：' + (running ? server.address().port : '—'),
     '工作区：' + (roots.length ? roots.join(', ') : '（未打开文件夹）'),
     'redhat.java：' + (rh ? (rh.isActive ? '已激活' : '已安装未激活') : '未安装'),
     'Lombok：' + (lombok.agentJar ? lombok.agentJar : '未探测到'),
     '请求数：' + requestCount + (lastRequestAt ? '，最近 ' + lastRequestAt.toLocaleString() : ''),
     '最近错误：' + (lastRequestError || '无'),
+    syncStatusLine(),
+    modelStatusLine(),
     '桥接文件：' + (bridgeFile || '未写入'),
   ].map((label) => ({ label }));
   await vscode.window.showQuickPick(items, {
@@ -444,7 +551,7 @@ function startServer() {
         lastRequestAt = new Date();
         lastRequestError = e.message;
         consecutiveErrors++;
-        if (consecutiveErrors >= 3) {
+        if (consecutiveErrors >= numberSetting('notifyAfterErrors', 3, 1)) {
           notify('warning', 'requests-failing',
             'Trae Java Bridge：连续 ' + consecutiveErrors + ' 次请求失败（' + e.message + '）。JDT LS 可能尚未就绪。',
             ['查看状态', '重启桥接']);
@@ -525,6 +632,7 @@ function activate(context) {
   // 工作区切换后重写桥接文件，避免 MCP 连到过期的工作区/端口
   context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
     refreshBridgeFile();
+    syncEngine.refreshWatcher();
     updateStatusBar();
   }));
   // 设置变更：enabled / port 需要重启监听；commandTimeout 下次请求即时生效
@@ -534,9 +642,16 @@ function activate(context) {
       || e.affectsConfiguration(CONFIG_SECTION + '.port')) {
       restartBridge();
     } else {
+      if (e.affectsConfiguration(CONFIG_SECTION + '.sync')
+        || e.affectsConfiguration(CONFIG_SECTION + '.watch')
+        || e.affectsConfiguration(CONFIG_SECTION + '.project')) {
+        syncEngine.refreshWatcher();
+      }
       updateStatusBar();
     }
   }));
+  syncEngine.refreshWatcher();
+  context.subscriptions.push({ dispose: () => syncEngine.dispose() });
   context.subscriptions.push({ dispose: stopServer });
 }
 
