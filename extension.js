@@ -80,10 +80,43 @@ function uriToFile(uri) {
   try { return uri.fsPath || fileURLToPath(uri); } catch (_) { return String(uri); }
 }
 
-function toUri(file) {
+// 相对路径兼容两种常见写法：相对工作区根，或“工程目录名/相对路径”（工作区本身就是工程根时）
+function pathCandidates(file) {
+  if (path.isAbsolute(file)) return [file];
+  const root = firstRoot() || process.cwd();
+  const out = [path.resolve(root, file)];
+  const base = path.basename(root);
+  const normalized = String(file).replace(/\\/g, '/');
+  if (normalized === base || normalized.startsWith(base + '/')) {
+    const rest = normalized.slice(base.length).replace(/^\/+/, '');
+    out.push(path.resolve(root, rest || '.'));
+  }
+  out.push(path.resolve(path.dirname(root), file));
+  return [...new Set(out)];
+}
+
+// 返回第一个存在的候选；都不存在时返回最佳猜测，由调用方决定是报错还是返回 missing
+function resolveFileBest(file) {
   if (!file) throw new Error('缺少 file 参数');
-  const p = path.isAbsolute(file) ? file : path.resolve(firstRoot() || process.cwd(), file);
-  return vscode.Uri.file(p);
+  const candidates = pathCandidates(file);
+  for (const c of candidates) {
+    try { if (fs.existsSync(c)) return { file: c, exists: true }; } catch (_) { /* ignore */ }
+  }
+  return { file: candidates[0], exists: false };
+}
+
+function resolveFile(file) {
+  const r = resolveFileBest(file);
+  if (!r.exists) throw new Error('文件不存在: ' + r.file);
+  return r.file;
+}
+
+function toUri(file) {
+  return vscode.Uri.file(resolveFile(file));
+}
+
+function fileExists(file) {
+  try { return !!file && fs.existsSync(file); } catch (_) { return false; }
 }
 
 function toPosition(line, column) {
@@ -150,6 +183,46 @@ function filterBySeverity(items, severity) {
   return items.filter((d) => d.severity === String(severity).toLowerCase());
 }
 
+// 给调用方一个可直接引用的口径：total 只统计本次返回的条目，allTotal 才是全部级别
+function languageOf(file) {
+  const base = String(file || '');
+  const i = base.lastIndexOf('.');
+  return i > -1 ? base.slice(i + 1).toLowerCase() : 'unknown';
+}
+
+function summarizeDiagnostics(items) {
+  const bySeverity = {};
+  const bySource = {};
+  const byLanguage = {};
+  const byCode = {};
+  for (const d of items) {
+    const source = d.source || 'unknown';
+    bySeverity[d.severity] = (bySeverity[d.severity] || 0) + 1;
+    bySource[source] = (bySource[source] || 0) + 1;
+    const lang = languageOf(d.file);
+    byLanguage[lang] = (byLanguage[lang] || 0) + 1;
+    const key = source + (d.code ? ':' + d.code : '');
+    byCode[key] = (byCode[key] || 0) + 1;
+  }
+  return { bySeverity, bySource, byLanguage, byCode };
+}
+
+// 文件模式附带工作区残留计数：避免“该文件 0 条”被误读成“整个工作区已清零”
+function workspaceDiagnosticTotals() {
+  const all = [];
+  for (const [uri, list] of vscode.languages.getDiagnostics()) {
+    if (!uri || uri.scheme !== 'file') continue;
+    all.push(...diagnosticsToJson(uri, list));
+  }
+  const summary = summarizeDiagnostics(all);
+  return {
+    total: all.length,
+    bySeverity: summary.bySeverity,
+    bySource: summary.bySource,
+    byLanguage: summary.byLanguage,
+  };
+}
+
 // IDE 命令在索引初始化阶段可能长时间不返回，必须设上限，避免 MCP/扩展一起挂住
 function withTimeout(promise, ms, label) {
   let timer = null;
@@ -187,27 +260,70 @@ async function handleApi(reqUrl) {
     const severity = q.get('severity') || 'all';
     const file = q.get('file');
     if (file) {
-      const uri = toUri(file);
+      const resolved = resolveFileBest(file);
+      // 文件已被移动/删除：仍返回 200，但明确标记 missing，而不是 500 让调用方去猜
+      if (!resolved.exists) {
+        return {
+          scope: 'file',
+          file: resolved.file,
+          severity,
+          missing: true,
+          total: 0,
+          allTotal: 0,
+          summary: summarizeDiagnostics([]),
+          workspaceTotals: workspaceDiagnosticTotals(),
+          items: [],
+          consistency: {
+            state: 'not_open',
+            stale: false,
+            dirty: false,
+            reloaded: false,
+            reason: '文件已不存在（可能被移动或删除）',
+          },
+        };
+      }
+      const uri = vscode.Uri.file(resolved.file);
       // 查询路径也做一致性检查：外部写入后先重读磁盘，再返回新鲜诊断
       const consistency = await syncEngine.syncIfNeeded(uri.fsPath);
-      const items = diagnosticsToJson(uri, vscode.languages.getDiagnostics(uri));
+      const all = diagnosticsToJson(uri, vscode.languages.getDiagnostics(uri));
+      const items = filterBySeverity(all, severity);
       return {
         scope: 'file',
         file: uriToFile(uri),
+        severity,
+        missing: false,
         total: items.length,
-        items: filterBySeverity(items, severity),
+        allTotal: all.length,
+        summary: summarizeDiagnostics(items),
+        workspaceTotals: workspaceDiagnosticTotals(),
+        items,
         consistency,
       };
     }
-    const items = [];
+    // 工作区模式过滤掉已删除/已移动文件残留的诊断，避免把幽灵条目当成真实错误
+    const all = [];
+    const missing = new Set();
     for (const [uri, list] of vscode.languages.getDiagnostics()) {
-      items.push(...diagnosticsToJson(uri, list));
+      if (!uri || uri.scheme !== 'file') continue;
+      const target = uriToFile(uri);
+      if (!fileExists(target)) {
+        if (list && list.length) missing.add(target);
+        continue;
+      }
+      all.push(...diagnosticsToJson(uri, list));
     }
-    items.sort((a, b) => String(a.file).localeCompare(String(b.file)) || (a.line || 0) - (b.line || 0));
-    const filtered = filterBySeverity(items, severity);
+    all.sort((a, b) => String(a.file).localeCompare(String(b.file)) || (a.line || 0) - (b.line || 0));
+    const filtered = filterBySeverity(all, severity);
+    const missingFiles = [...missing].sort();
     return {
       scope: 'project',
+      severity,
       total: filtered.length,
+      allTotal: all.length,
+      summary: summarizeDiagnostics(filtered),
+      skippedMissing: missingFiles.length,
+      missingFiles: missingFiles.slice(0, 20),
+      missingTruncated: missingFiles.length > 20,
       items: filtered,
       consistency: syncEngine.projectState(),
     };
@@ -222,7 +338,7 @@ async function handleApi(reqUrl) {
     const query = q.get('query') || '';
     const limit = Math.min(Number(q.get('limit')) || 50, 200);
     const result = await execCommand('workspace/symbol', 'vscode.executeWorkspaceSymbolProvider', query);
-    const items = (result || []).slice(0, limit).map((s) => {
+    const mapped = (result || []).map((s) => {
       const loc = s.location || {};
       return {
         name: s.name,
@@ -231,24 +347,37 @@ async function handleApi(reqUrl) {
         ...locationToJson(loc.uri, loc.range),
       };
     });
-    return { count: items.length, items };
+    // 索引里可能还留着已删除/已移动文件的旧位置，直接过滤掉
+    const items = mapped.filter((i) => fileExists(i.file));
+    return { count: items.length, skippedMissing: mapped.length - items.length, items: items.slice(0, limit) };
   }
   if (p === '/definition') {
     const result = await execCommand('definition', 'vscode.executeDefinitionProvider',
       toUri(q.get('file')), toPosition(q.get('line'), q.get('column')));
-    return { items: normalizeLocations(result) };
+    const all = normalizeLocations(result);
+    const items = all.filter((i) => fileExists(i.file));
+    return { items, skippedMissing: all.length - items.length };
   }
   if (p === '/references') {
     const result = await execCommand('references', 'vscode.executeReferenceProvider',
       toUri(q.get('file')), toPosition(q.get('line'), q.get('column')));
-    const all = normalizeLocations(result);
+    const raw = normalizeLocations(result);
+    const all = raw.filter((i) => fileExists(i.file));
     // limit<=0 表示不截断；大仓库引用可能上千条，调用方可按需收窄
     const limit = Math.max(0, Number(q.get('limit')) || 0);
     const items = limit > 0 ? all.slice(0, limit) : all;
-    return { count: all.length, returned: items.length, truncated: items.length < all.length, items };
+    return {
+      count: all.length,
+      returned: items.length,
+      truncated: items.length < all.length,
+      skippedMissing: raw.length - all.length,
+      items,
+    };
   }
   if (p === '/documentSymbols') {
-    const uri = toUri(q.get('file'));
+    const resolved = resolveFileBest(q.get('file'));
+    if (!resolved.exists) return { file: resolved.file, missing: true, count: 0, items: [] };
+    const uri = vscode.Uri.file(resolved.file);
     const wantName = (q.get('name') || '').toLowerCase();
     const wantKind = (q.get('kind') || '').toLowerCase();
     const limit = Math.min(Number(q.get('limit')) || 200, 1000);
@@ -322,6 +451,7 @@ function syncConfig() {
     buildTimeoutMs: numberSetting('project.buildTimeoutMs', 120000, 5000),
     reloadTimeoutMs: numberSetting('project.reloadTimeoutMs', 15000, 1000),
     reloadQuietMs: numberSetting('project.reloadQuietMs', 800, 100),
+    refreshSettleMs: numberSetting('project.refreshSettleMs', 3000, 300),
     changedFilesLimit: numberSetting('project.changedFilesLimit', 20, 1),
     dirtyMaxFiles: numberSetting('project.dirtyMaxFiles', 2000, 100),
   };

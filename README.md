@@ -82,9 +82,9 @@ node install.mjs --vsix dist/trae-java-bridge.vsix
 
 提供接口：`/health`、`/diagnostics`、`/refresh`、`/symbols`、`/definition`、`/references`、`/documentSymbols`（支持 `name`/`kind`/`limit` 过滤）、`/hover`。
 
-`/diagnostics` 在返回前会做一次一致性检查：编辑器内容落后于磁盘时，先重读磁盘（只读重载，不写盘）、等待 JDT 刷新，再返回诊断，并附带 `consistency`（`state` / `stale` / `dirty` / `reloaded` / `reason`）；工作区模式附带 `needsRefresh` / `changedFiles`。文件监听对已打开的 `.java` 变化调用同一套逻辑，构建产物目录默认排除。
+`/diagnostics` 在返回前会做一次一致性检查：编辑器内容落后于磁盘时，先重读磁盘（只读重载，不写盘）、等待 JDT 刷新，再返回诊断，并附带 `consistency`（`state` / `stale` / `dirty` / `reloaded` / `reason`）；工作区模式附带 `needsRefresh` / `changedFiles`。返回的 `total` 只统计本次 `severity` 过滤后的条目（与 Problems 面板同级别条数一致），`allTotal` 为全部级别条数，`summary` 给出按 `severity` / `source` / `language` / `code` 的计数，文件模式还用 `workspaceTotals` 给出整个工作区的残留计数，便于 MCP 直接引用而不必自己数 `items`。文件被移动/删除后，工作区模式会过滤掉指向不存在文件的幽灵诊断（`skippedMissing` / `missingFiles`），文件模式返回 `missing=true`。文件监听对已打开的 `.java` 变化调用同一套逻辑，构建产物目录默认排除。
 
-批量写入时监听路径只做重读、不逐个等待诊断；外部变更停止 2 秒后自动执行一次增量构建（`java.workspace.compile`，单飞、两次构建最小间隔 5 秒），刷新未打开文件与项目级诊断。变更文件数达到 50 时自动升级为 `java.projectConfiguration.update` 完整重载，修复批量移动/重命名后的项目模型错位；也可通过 `/refresh?mode=auto|build|config` 显式触发（`config` 等价于官方“Reload Project”，不需要修改 `pom.xml` 时间戳）。
+批量写入时监听路径只做重读、不逐个等待诊断；外部变更停止 2 秒后自动执行一次增量构建（`java.workspace.compile`，单飞、两次构建最小间隔 5 秒），刷新未打开文件与项目级诊断。构建后会等待本批文件出现诊断变化（`refreshSettleMs`），没有变化则自动升级为 `java.projectConfiguration.update` 完整重载，修复批量移动/重命名后的项目模型错位；变更文件数达到 50 时直接完整重载；也可通过 `/refresh?mode=auto|build|config` 显式触发（`config` 等价于官方“Reload Project”，不需要修改 `pom.xml` 时间戳）。
 
 ## 安装细节
 
@@ -173,6 +173,7 @@ node install.mjs --vsix dist/trae-java-bridge.vsix
 | `traeJavaBridge.project.buildTimeoutMs` | `120000` | `java.workspace.compile` 超时（ms） |
 | `traeJavaBridge.project.reloadTimeoutMs` | `15000` | 完整重载等待诊断静默的上限（ms） |
 | `traeJavaBridge.project.reloadQuietMs` | `800` | 诊断静默多久视为重载完成（ms） |
+| `traeJavaBridge.project.refreshSettleMs` | `3000` | 增量编译后等待本批文件诊断更新的上限（ms）；没有任何诊断变化时自动升级为完整重载 |
 | `traeJavaBridge.project.changedFilesLimit` | `20` | `needsRefresh.changedFiles` 最多返回多少个文件 |
 | `traeJavaBridge.project.dirtyMaxFiles` | `2000` | `projectDirty` 最多跟踪多少个文件 |
 

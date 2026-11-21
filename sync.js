@@ -21,6 +21,7 @@ const DEFAULT_REVERT_TIMEOUT_MS = 5000;
 const DEFAULT_AUTO_CONFIG_MIN_FILES = 50;
 const DEFAULT_RELOAD_QUIET_MS = 800;
 const DEFAULT_RELOAD_TIMEOUT_MS = 15000;
+const DEFAULT_REFRESH_SETTLE_MS = 3000;
 const MAX_REFRESH_WAIT_MS = 60000;
 
 function num(value, fallback, min) {
@@ -115,6 +116,8 @@ function createSyncEngine(options) {
   let projectDirtySince = 0;
   let syncingCount = 0;
   let refreshActivity = null;
+  // 上一轮刷新没有等到诊断更新：保留待刷新标记，等下一次外部变化再重试，避免构建风暴
+  let retrySuppressed = false;
   let disposed = false;
 
   function currentActivity() {
@@ -189,9 +192,17 @@ function createSyncEngine(options) {
     }
   }
 
-  function clearProjectDirty() {
-    projectDirty.clear();
-    projectDirtySince = 0;
+  // 只摘掉本批文件，构建期间新到的变化不会被顺带清掉
+  function removeDirty(files) {
+    for (const file of files) projectDirty.delete(path.resolve(file));
+    if (!projectDirty.size) projectDirtySince = 0;
+  }
+
+  // 刷新未确认时恢复标记；已从磁盘删除的文件不再占用待刷新计数
+  function restoreDirty(files) {
+    for (const file of files) {
+      try { if (fs.existsSync(file)) noteProjectDirty(file); } catch (_) { /* ignore */ }
+    }
   }
 
   function projectState() {
@@ -262,15 +273,15 @@ function createSyncEngine(options) {
     }
   }
 
-  // 在重读前先订阅，避免 JDT 抢在订阅前发布诊断导致误判超时
-  function createDiagnosticsProbe(uri) {
+  // 在动作前先订阅，避免 JDT 抢在订阅前发布诊断导致误判超时
+  function createDiagnosticsProbe(matches) {
     let hit = false;
     let resolveHit = null;
     let cleaned = false;
     const hitPromise = new Promise((resolve) => { resolveHit = resolve; });
     const listener = vscode.languages.onDidChangeDiagnostics((event) => {
       for (const changed of (event && event.uris) || []) {
-        if (changed.scheme === uri.scheme && samePath(changed.fsPath, uri.fsPath)) {
+        if (matches(changed)) {
           hit = true;
           resolveHit(true);
           return;
@@ -302,6 +313,20 @@ function createSyncEngine(options) {
       },
       dispose: cleanup,
     };
+  }
+
+  function probeForFile(uri) {
+    return createDiagnosticsProbe(
+      (changed) => changed.scheme === uri.scheme && samePath(changed.fsPath, uri.fsPath),
+    );
+  }
+
+  // 批量刷新是否生效，以“本批文件出现诊断变化”为准
+  function probeForFiles(files) {
+    const wanted = new Set(files.map(keyOf));
+    return createDiagnosticsProbe(
+      (changed) => changed.scheme === 'file' && wanted.has(keyOf(changed.fsPath || '')),
+    );
   }
 
   async function doSync(file, key, opts) {
@@ -389,7 +414,7 @@ function createSyncEngine(options) {
     let applied = false;
     let fresh = true;
     try {
-      probe = waitDiagnostics ? createDiagnosticsProbe(doc.uri) : null;
+      probe = waitDiagnostics ? probeForFile(doc.uri) : null;
       applied = await applyDiskContent(doc, diskText);
       if (applied && probe) fresh = await probe.wait(cfg.timeoutMs);
     } finally {
@@ -450,15 +475,21 @@ function createSyncEngine(options) {
     pending.clear();
     const cfg = getConfig();
     if (!cfg.enabled || !items.length) return;
+    let sawChange = false;
     for (const item of items) {
       if (isExcluded(item.file, cfg.exclude)) continue;
       const key = keyOf(item.file);
       const selfWriteAt = selfWrites.get(key);
       if (selfWriteAt && Date.now() - selfWriteAt < cfgNumber('selfWriteGraceMs', DEFAULT_SELF_WRITE_GRACE_MS, 100)) continue;
+      sawChange = true;
       if (item.kind === 'delete') {
         registry.delete(key);
         noteProjectDirty(item.file);
         continue;
+      }
+      if (item.kind === 'create') {
+        // 新建文件即使已在编辑器打开，也需要 JDT 更新资源模型与索引，必须计入项目级刷新
+        noteProjectDirty(item.file);
       }
       if (!findDocument(item.file)) {
         noteProjectDirty(item.file);
@@ -466,7 +497,8 @@ function createSyncEngine(options) {
       }
       await syncIfNeeded(item.file, { waitDiagnostics: false });
     }
-    if (projectDirty.size && cfg.autoBuild) {
+    if (sawChange) retrySuppressed = false;
+    if (projectDirty.size && cfg.autoBuild && !retrySuppressed) {
       scheduleBuild(projectDirty.size >= cfgNumber('autoConfigMinFiles', DEFAULT_AUTO_CONFIG_MIN_FILES, 1));
     }
     onStatsChanged();
@@ -570,6 +602,20 @@ function createSyncEngine(options) {
     }, wait);
   }
 
+  // 完整重载：诊断静默视为完成；大仓库诊断持续发布时会超时，此时只要本批文件已出现诊断变化也算生效
+  async function reloadProject(batch, waitMs) {
+    const probe = probeForFiles(batch);
+    const timeout = num(waitMs, cfgNumber('reloadTimeoutMs', DEFAULT_RELOAD_TIMEOUT_MS, 1000), 1000);
+    try {
+      const r = await updateProjectConfiguration(timeout);
+      const confirmed = r.completed
+        || await probe.wait(cfgNumber('refreshSettleMs', DEFAULT_REFRESH_SETTLE_MS, 300));
+      return { completed: confirmed, files: r.files };
+    } finally {
+      probe.dispose();
+    }
+  }
+
   async function runBuild(forceConfig) {
     buildTimer = null;
     if (!projectDirty.size) return;
@@ -579,28 +625,54 @@ function createSyncEngine(options) {
       return;
     }
     building = true;
+    retrySuppressed = false;
     const batch = [...projectDirty];
-    clearProjectDirty();
-    const useConfig = forceConfig === true
+    removeDirty(batch);
+    let useConfig = forceConfig === true
       || batch.length >= cfgNumber('autoConfigMinFiles', DEFAULT_AUTO_CONFIG_MIN_FILES, 1);
+    // settled 表示“本次刷新确实产生了新的 Java 诊断”，不再只以命令返回成功为准
+    let settled = false;
     setRefreshActivity(useConfig ? 'reloading' : 'building');
     try {
       if (useConfig) {
-        const r = await updateProjectConfiguration(cfgNumber('reloadTimeoutMs', DEFAULT_RELOAD_TIMEOUT_MS, 1000));
-        stats.lastBuildMode = 'config';
-        stats.lastBuildError = r.completed ? null : '项目重载仍在进行（等待诊断静默超时）';
+        const r = await reloadProject(batch);
+        settled = r.completed;
       } else {
-        await compileWorkspace();
-        stats.lastBuildMode = 'build';
-        stats.lastBuildError = null;
+        const probe = probeForFiles(batch);
+        try {
+          await compileWorkspace();
+          settled = await probe.wait(cfgNumber('refreshSettleMs', DEFAULT_REFRESH_SETTLE_MS, 300));
+        } finally {
+          probe.dispose();
+        }
+        if (!settled) {
+          // JDT 漏掉 didChangeWatchedFiles 时增量编译会是空操作：升级为完整重载，重建资源模型与索引
+          log('增量构建未刷新诊断，升级完整重载（' + batch.length + ' 个文件）');
+          setRefreshActivity('reloading');
+          useConfig = true;
+          const r = await reloadProject(batch);
+          settled = r.completed;
+        }
       }
       stats.lastBuildAt = new Date();
-      stats.lastModelRefreshAt = new Date();
+      stats.lastBuildMode = useConfig ? 'config' : 'build';
+      if (settled) {
+        stats.lastBuildError = null;
+        stats.lastModelRefreshAt = new Date();
+      } else {
+        // 没等到刷新信号：保留待刷新标记（状态栏继续显示待刷新），等下一次外部变化再试
+        retrySuppressed = true;
+        restoreDirty(batch);
+        stats.lastBuildError = useConfig
+          ? '项目重载仍在进行（等待诊断静默超时）'
+          : '刷新后未观察到诊断更新';
+      }
     } catch (e) {
       stats.lastBuildAt = new Date();
       stats.lastBuildMode = useConfig ? 'config' : 'build';
       stats.lastBuildError = e.message;
-      for (const f of batch) noteProjectDirty(f);
+      retrySuppressed = true;
+      restoreDirty(batch);
       log('项目刷新失败: ' + e.message);
     } finally {
       building = false;
@@ -611,7 +683,7 @@ function createSyncEngine(options) {
         const cfg = buildQueuedConfig;
         buildQueuedConfig = false;
         scheduleBuild(cfg);
-      } else if (projectDirty.size && getConfig().autoBuild) {
+      } else if (projectDirty.size && getConfig().autoBuild && !retrySuppressed) {
         scheduleBuild(projectDirty.size >= cfgNumber('autoConfigMinFiles', DEFAULT_AUTO_CONFIG_MIN_FILES, 1));
       }
     }
@@ -624,6 +696,8 @@ function createSyncEngine(options) {
     const waitMs = Math.max(1000, Math.min(Number(timeoutMs) || defaultWait, MAX_REFRESH_WAIT_MS));
     const started = Date.now();
     const actions = [];
+    // 只清理发起时的待刷新集合，刷新期间新写入的文件仍保持待刷新
+    const snapshot = [...projectDirty];
     let completed = true;
     let error = null;
     let used = (requested === 'config'
@@ -632,7 +706,7 @@ function createSyncEngine(options) {
     setRefreshActivity(used === 'config' ? 'reloading' : 'building');
     try {
       if (used === 'config') {
-        const r = await updateProjectConfiguration(waitMs);
+        const r = await reloadProject(snapshot, waitMs);
         completed = r.completed;
         actions.push('projectConfiguration.update', ...r.files);
       } else {
@@ -645,7 +719,7 @@ function createSyncEngine(options) {
       if (used === 'build') {
         try {
           setRefreshActivity('reloading');
-          const r = await updateProjectConfiguration(waitMs);
+          const r = await reloadProject(snapshot, waitMs);
           used = 'config';
           completed = r.completed;
           actions.push('projectConfiguration.update', ...r.files);
@@ -657,7 +731,7 @@ function createSyncEngine(options) {
     }
     setRefreshActivity(null);
     if (!error) {
-      clearProjectDirty();
+      removeDirty(snapshot);
       stats.lastBuildAt = new Date();
       stats.lastBuildMode = used;
       stats.lastBuildError = completed ? null : '项目重载仍在进行（等待诊断静默超时）';

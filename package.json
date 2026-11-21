@@ -2,7 +2,7 @@
   "name": "trae-java-bridge",
   "displayName": "Trae Java Bridge",
   "description": "Local HTTP bridge that exposes VS Code Java diagnostics and navigation APIs to the Trae Java Navigator MCP server.",
-  "version": "0.1.25",
+  "version": "0.1.29",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -170,6 +170,12 @@
             "default": 800,
             "minimum": 100,
             "description": "完整重载时，诊断最后一次变化后静默多久视为完成（毫秒）。"
+          },
+          "traeJavaBridge.project.refreshSettleMs": {
+            "type": "number",
+            "default": 3000,
+            "minimum": 300,
+            "description": "增量编译后等待本批文件诊断更新的时长（毫秒）；期间没有任何诊断变化时，自动升级为完整重载，避免“编译成功但 Problems 没变”。"
           },
           "traeJavaBridge.project.changedFilesLimit": {
             "type": "number",

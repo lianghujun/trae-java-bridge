@@ -82,9 +82,9 @@ The file contains the port, token, window identity, workspace list, and redhat.j
 
 Endpoints: `/health`, `/diagnostics`, `/refresh`, `/symbols`, `/definition`, `/references`, `/documentSymbols` (supports `name` / `kind` / `limit` filters), `/hover`.
 
-Before returning, `/diagnostics` checks whether the editor content lags behind disk. If so it reloads from disk (read-only, no write), waits for JDT to refresh, then returns diagnostics together with `consistency` (`state` / `stale` / `dirty` / `reloaded` / `reason`); workspace mode also returns `needsRefresh` / `changedFiles`. The file watcher runs the same logic for changes to open `.java` files, with build output directories excluded by default.
+Before returning, `/diagnostics` checks whether the editor content lags behind disk. If so it reloads from disk (read-only, no write), waits for JDT to refresh, then returns diagnostics together with `consistency` (`state` / `stale` / `dirty` / `reloaded` / `reason`); workspace mode also returns `needsRefresh` / `changedFiles`. `total` counts only items after the `severity` filter (matching the same-severity count in the Problems panel), `allTotal` counts every severity, `summary` gives counts by `severity` / `source` / `language` / `code`, and file mode adds `workspaceTotals` for the workspace-wide residue so clients quote numbers instead of counting `items`. After files are moved or deleted, workspace mode filters ghost diagnostics that point at missing files (`skippedMissing` / `missingFiles`), and file mode returns `missing:true`. The file watcher runs the same logic for changes to open `.java` files, with build output directories excluded by default.
 
-During bulk writes the watcher only reloads and does not wait for diagnostics per file; once external changes stop for 2 s it runs one incremental build (`java.workspace.compile`, single-flight, at least 5 s apart) to refresh closed files and project-level diagnostics. When 50 or more files changed, it automatically escalates to a full `java.projectConfiguration.update` reload, which repairs a project model skewed by bulk moves/renames; you can also trigger it explicitly via `/refresh?mode=auto|build|config` (`config` is equivalent to the official "Reload Project", with no need to touch `pom.xml` timestamps).
+During bulk writes the watcher only reloads and does not wait for diagnostics per file; once external changes stop for 2 s it runs one incremental build (`java.workspace.compile`, single-flight, at least 5 s apart) to refresh closed files and project-level diagnostics. After the build it waits for this batch's diagnostics to change (`refreshSettleMs`); if nothing changed it escalates to a full `java.projectConfiguration.update` reload, which repairs a project model skewed by bulk moves/renames. Batches of 50+ files go straight to the full reload; you can also trigger it explicitly via `/refresh?mode=auto|build|config` (`config` is equivalent to the official "Reload Project", with no need to touch `pom.xml` timestamps).
 
 ## Installation Details
 
@@ -173,6 +173,7 @@ Extension settings (Settings → Extensions → Trae Java Bridge), grouped into 
 | `traeJavaBridge.project.buildTimeoutMs` | `120000` | Timeout for `java.workspace.compile` (ms) |
 | `traeJavaBridge.project.reloadTimeoutMs` | `15000` | Max wait for diagnostics to settle after a full reload (ms) |
 | `traeJavaBridge.project.reloadQuietMs` | `800` | Diagnostics quiet period that marks a reload as complete (ms) |
+| `traeJavaBridge.project.refreshSettleMs` | `3000` | Max wait for this batch's diagnostics to change after an incremental build (ms); escalates to a full reload when nothing changed |
 | `traeJavaBridge.project.changedFilesLimit` | `20` | Max files returned in `needsRefresh.changedFiles` |
 | `traeJavaBridge.project.dirtyMaxFiles` | `2000` | Max files tracked in `projectDirty` |
 
